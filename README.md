@@ -1,0 +1,2 @@
+# Penetration_identification
+基于Efficientnet网络逐步搭建熔透识别模型 （基本的EfficientnetV2网络是B站霹雳吧啦Wz老师写的，写得太好了T.T）
