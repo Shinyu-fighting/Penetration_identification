@@ -1,0 +1,5 @@
+# 忽略 Test11_efficientnetV2/torch_efficientnetv2_weight 文件夹中的所有文件
+Test11_efficientnetV2/torch_efficientnetv2_weight/*
+
+# 但保留文件夹中空的 .gitkeep 文件
+!Test11_efficientnetV2/torch_efficientnetv2_weight/.gitkeep
