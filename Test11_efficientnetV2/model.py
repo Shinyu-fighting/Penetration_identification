@@ -96,6 +96,21 @@ class SqueezeExcite(nn.Module):
         return scale * x
 
 
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        padding = (kernel_size - 1) // 2  # 保证卷积后尺寸不变
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)  # 平均池化: [B, 1, H, W]
+        max_out, _ = torch.max(x, dim=1, keepdim=True)  # 最大池化: [B, 1, H, W]
+        x_cat = torch.cat([avg_out, max_out], dim=1)  # 拼接: [B, 2, H, W]
+        attn = self.sigmoid(self.conv(x_cat))  # 注意力图: [B, 1, H, W]
+        return x * attn  # 原输入乘注意力，不改变 shape
+
+
 class MBConv(nn.Module):
     def __init__(self,
                  kernel_size: int,
@@ -135,6 +150,7 @@ class MBConv(nn.Module):
                                 activation_layer=activation_layer)
 
         self.se = SqueezeExcite(input_c, expanded_c, se_ratio) if se_ratio > 0 else nn.Identity()
+        self.sa = SpatialAttention()
 
         # Point-wise linear projection
         self.project_conv = ConvBNAct(expanded_c,
@@ -155,6 +171,7 @@ class MBConv(nn.Module):
         result = self.dwconv(result)
         result = self.se(result)
         result = self.project_conv(result)
+        result = self.sa(result)
 
         if self.has_shortcut:
             if self.drop_rate > 0:
