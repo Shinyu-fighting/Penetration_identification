@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from functools import partial
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple, List
 
 import torch.nn as nn
 import torch
@@ -251,13 +251,41 @@ class FusedMBConv(nn.Module):
         return result
 
 
+# 获取中间层通道数
+def get_mid_feat_channels(model_cnf: List[list], mid_layer_idx: int) -> int:
+    block_channels = []
+    for cnf in model_cnf:
+        repeats = cnf[0]
+        out_c = cnf[5]
+        block_channels += [out_c] * repeats
+    assert mid_layer_idx < len(block_channels), "mid_layer_idx 超出block总数！"
+    return block_channels[mid_layer_idx]
+
+
+# 提取中间层特征
+class FeatureExtractor(nn.Module):
+    def __init__(self, blocks: nn.ModuleList, extract_idx: int):
+        super().__init__()
+        self.blocks = blocks
+        self.extract_idx = extract_idx
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        mid_feat = None
+        for idx, block in enumerate(self.blocks):
+            x = block(x)
+            if idx == self.extract_idx:
+                mid_feat = x
+        return x, mid_feat
+
+
 class EfficientNetV2(nn.Module):
     def __init__(self,
                  model_cnf: list,
                  num_classes: int = 1000,
                  num_features: int = 1280,
                  dropout_rate: float = 0.2,
-                 drop_connect_rate: float = 0.2):
+                 drop_connect_rate: float = 0.2
+                 , mid_layer_idx: int = 10):  # 增加初始化参数
         super(EfficientNetV2, self).__init__()
 
         for cnf in model_cnf:
@@ -289,7 +317,18 @@ class EfficientNetV2(nn.Module):
                                  drop_rate=drop_connect_rate * block_id / total_blocks,
                                  norm_layer=norm_layer))
                 block_id += 1
-        self.blocks = nn.Sequential(*blocks)
+        # 为了访问中间环节，把nn.Sequential进行修改
+        # self.blocks = nn.Sequential(*blocks)
+        self.blocks = nn.ModuleList(blocks)
+        self.extractor = FeatureExtractor(self.blocks, extract_idx=mid_layer_idx)
+        mid_feat_channels = get_mid_feat_channels(model_cnf, mid_layer_idx)
+
+        # 新增回归分支，输出顺序: [锁孔宽度, 锁孔面积, 熔池宽度, 熔池面积]
+        self.reg = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(mid_feat_channels, 4)
+        )
 
         head_input_c = model_cnf[-1][-3]
         head = OrderedDict()
@@ -304,9 +343,17 @@ class EfficientNetV2(nn.Module):
 
         if dropout_rate > 0:
             head.update({"dropout": nn.Dropout(p=dropout_rate, inplace=True)})
-        head.update({"classifier": nn.Linear(num_features, num_classes)})
+
+        # head.update({"classifier": nn.Linear(num_features, num_classes)}) 分类在后面拼接后进行
 
         self.head = nn.Sequential(head)
+
+        # 融合回归分支输出的分类头
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(num_features + 4, num_features),
+            nn.ReLU(),
+            nn.Linear(num_features, num_classes)
+        )
 
         # initial weights
         for m in self.modules():
@@ -321,13 +368,25 @@ class EfficientNetV2(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x: Tensor) -> Tensor:
+    # def forward(self, x: Tensor) -> Tensor:
+    #     x = self.stem(x)
+    #     x = self.blocks(x)
+    #     x = self.head(x)
+    #
+    #     return x
+
+    # 更新forward逻辑
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.stem(x)
-        x = self.blocks(x)
-        x = self.head(x)
+        x, mid_feat = self.extractor(x)
+        reg_output = self.reg(mid_feat)
 
-        return x
+        for layer in self.head:
+            x = layer(x)
 
+        fused = torch.cat([x, reg_output], dim=1)
+        cls_output = self.fusion_layer(fused)
+        return cls_output, reg_output
 
 def efficientnetv2_s(num_classes: int = 1000):
     """
